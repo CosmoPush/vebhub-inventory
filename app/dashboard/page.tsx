@@ -32,9 +32,20 @@ import {
   ChevronRight,
 } from "lucide-react";
 import Link from "next/link";
-import type { LocationWithInventory, StockStatus } from "@/lib/types/domain";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+
+type StockStatus = "good" | "low" | "out";
+
+interface LocationWithInventory {
+  id: string;
+  name: string;
+  locationCode: string;
+  address: string | null;
+  lowStockCount: number;
+  totalProducts: number;
+  stockStatus: StockStatus;
+}
 
 interface DashboardStats {
   totalLocations: number;
