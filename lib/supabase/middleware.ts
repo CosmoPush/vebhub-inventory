@@ -44,11 +44,6 @@ export async function updateSession(request: NextRequest) {
         cookies: request.cookies.getAll().map((c) => ({ name: c.name, hasValue: !!c.value })),
     })
 
-    // Allow access to setup pages without authentication
-    if (pathname.startsWith("/setup") || pathname === "/") {
-        return supabaseResponse
-    }
-
     // If user is not signed in and trying to access protected routes
     if (!user && pathname !== "/login") {
         console.log("Middleware - No user, redirecting to login")
