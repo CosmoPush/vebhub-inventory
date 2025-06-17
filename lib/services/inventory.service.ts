@@ -1,13 +1,49 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { BaseService } from "./base.service"
-import type {
-  Inventory,
-  InventoryWithDetails,
-  LocationWithInventory,
-  UpdateInventoryDTO,
-  StockStatus,
-} from "@/lib/types/domain"
-import { ValidationError } from "@/lib/types/domain"
+
+// Define types locally to avoid import issues
+interface Inventory {
+  id: string
+  location_id: string
+  product_id: string
+  current_stock: number
+  min_stock: number
+  max_stock: number
+  last_restocked: string | null
+  updated_at: string
+}
+
+interface InventoryWithDetails extends Inventory {
+  location?: any
+  product?: any
+  stockStatus: StockStatus
+}
+
+interface LocationWithInventory {
+  id: string
+  name: string
+  locationCode: string
+  address: string | null
+  inventory: InventoryWithDetails[]
+  lowStockCount: number
+  totalProducts: number
+  stockStatus: StockStatus
+}
+
+interface UpdateInventoryDTO {
+  currentStock?: number
+  minStock?: number
+  maxStock?: number
+}
+
+type StockStatus = "good" | "low" | "out"
+
+class ValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ValidationError"
+  }
+}
 
 export class InventoryService extends BaseService {
   constructor(db: SupabaseClient) {
@@ -15,31 +51,33 @@ export class InventoryService extends BaseService {
   }
 
   async getLocationInventory(locationId: string): Promise<InventoryWithDetails[]> {
-    const inventory = await this.executeQuery(
-      () =>
-        this.db
-          .from("inventory")
-          .select(`
-          *,
-          location:locations(*),
-          product:products(*)
-        `)
-          .eq("location_id", locationId),
-      "Failed to fetch location inventory",
-    )
+    const { data: inventory, error } = await this.db
+      .from("inventory")
+      .select(`
+        *,
+        location:locations(*),
+        product:products(*)
+      `)
+      .eq("location_id", locationId)
 
-    return inventory.map(this.mapToInventoryWithDetails)
+    if (error) {
+      throw new Error(`Failed to fetch location inventory: ${error.message}`)
+    }
+
+    return (inventory || []).map(this.mapToInventoryWithDetails)
   }
 
   async getLocationWithInventory(locationId: string): Promise<LocationWithInventory> {
-    const [location, inventory] = await Promise.all([
-      this.executeQuery(
-        () => this.db.from("locations").select("*").eq("id", locationId).single(),
-        "Location not found",
-      ),
+    const [locationResult, inventory] = await Promise.all([
+      this.db.from("locations").select("*").eq("id", locationId).single(),
       this.getLocationInventory(locationId),
     ])
 
+    if (locationResult.error) {
+      throw new Error(`Location not found: ${locationResult.error.message}`)
+    }
+
+    const location = locationResult.data
     const lowStockCount = inventory.filter((inv) => inv.stockStatus === "low" || inv.stockStatus === "out").length
     const stockStatus = this.calculateLocationStockStatus(inventory)
 
@@ -54,19 +92,19 @@ export class InventoryService extends BaseService {
   }
 
   async getAllLocationsWithInventory(): Promise<LocationWithInventory[]> {
-    const locations = await this.executeQuery(
-      () =>
-        this.db.from("locations").select(`
+    const { data: locations, error } = await this.db.from("locations").select(`
+      *,
+      inventory (
         *,
-        inventory (
-          *,
-          product:products (*)
-        )
-      `),
-      "Failed to fetch locations with inventory",
-    )
+        product:products (*)
+      )
+    `)
 
-    return locations.map((location) => {
+    if (error) {
+      throw new Error(`Failed to fetch locations with inventory: ${error.message}`)
+    }
+
+    return (locations || []).map((location) => {
       const inventory = (location.inventory || []).map(this.mapToInventoryWithDetails)
       const lowStockCount = inventory.filter((inv) => inv.stockStatus === "low" || inv.stockStatus === "out").length
       const stockStatus = this.calculateLocationStockStatus(inventory)
@@ -173,22 +211,23 @@ export class InventoryService extends BaseService {
   }
 
   async getLowStockItems(limit = 50): Promise<InventoryWithDetails[]> {
-    const inventory = await this.executeQuery(
-      () =>
-        this.db
-          .from("inventory")
-          .select(`
-          *,
-          location:locations(*),
-          product:products(*)
-        `)
-          .lte("current_stock", this.db.raw("min_stock"))
-          .order("current_stock", { ascending: true })
-          .limit(limit),
-      "Failed to fetch low stock items",
-    )
+    // Use a raw SQL condition for comparing columns
+    const { data: inventory, error } = await this.db
+      .from("inventory")
+      .select(`
+        *,
+        location:locations(*),
+        product:products(*)
+      `)
+      .filter("current_stock", "lte", "min_stock")
+      .order("current_stock", { ascending: true })
+      .limit(limit)
 
-    return inventory.map(this.mapToInventoryWithDetails)
+    if (error) {
+      throw new Error(`Failed to fetch low stock items: ${error.message}`)
+    }
+
+    return (inventory || []).map(this.mapToInventoryWithDetails)
   }
 
   private validateInventoryUpdates(updates: UpdateInventoryDTO): void {

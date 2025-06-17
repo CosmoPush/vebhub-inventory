@@ -1,7 +1,27 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 import { BaseService } from "./base.service"
-import type { Location, CreateLocationDTO } from "@/lib/types/domain"
-import { ValidationError } from "@/lib/types/domain"
+
+// Define types locally to avoid import issues
+interface Location {
+  id: string
+  name: string
+  location_code: string
+  address: string | null
+  updated_at: string
+}
+
+interface CreateLocationDTO {
+  name: string
+  locationCode: string
+  address?: string
+}
+
+class ValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ValidationError"
+  }
+}
 
 export class LocationService extends BaseService {
   constructor(db: SupabaseClient) {
@@ -9,24 +29,35 @@ export class LocationService extends BaseService {
   }
 
   async findById(id: string): Promise<Location> {
-    this.logger.info("Finding location by ID", { id })
+    console.log("Finding location by ID", { id })
 
-    return await this.executeQuery(
-      () => this.db.from("locations").select("*").eq("id", id).single(),
-      "Location not found",
-    )
-  }
+    const { data, error } = await this.db.from("locations").select("*").eq("id", id).single()
 
-  async findByCode(locationCode: string): Promise<Location | null> {
-    this.logger.info("Finding location by code", { locationCode })
+    if (error) {
+      throw new Error(`Location not found: ${error.message}`)
+    }
 
-    const { data } = await this.db.from("locations").select("*").eq("location_code", locationCode).single()
+    if (!data) {
+      throw new Error("Location not found")
+    }
 
     return data
   }
 
+  async findByCode(locationCode: string): Promise<Location | null> {
+    console.log("Finding location by code", { locationCode })
+
+    const { data, error } = await this.db.from("locations").select("*").eq("location_code", locationCode).single()
+
+    if (error && error.code !== "PGRST116") {
+      throw new Error(`Failed to find location: ${error.message}`)
+    }
+
+    return data || null
+  }
+
   async findOrCreateByCode(locationCode: string, name: string, address?: string): Promise<Location> {
-    this.logger.info("Finding or creating location by code", { locationCode, name })
+    console.log("Finding or creating location by code", { locationCode, name })
 
     try {
       // Try to find existing location with normalized code
@@ -39,7 +70,7 @@ export class LocationService extends BaseService {
         .single()
 
       if (existingLocation && !findError) {
-        this.logger.info("Found existing location", {
+        console.log("Found existing location", {
           locationId: existingLocation.id,
           locationCode: existingLocation.location_code,
         })
@@ -47,20 +78,20 @@ export class LocationService extends BaseService {
       }
 
       // Create new location
-      this.logger.info("Creating new location", { locationCode, name, address })
+      console.log("Creating new location", { locationCode, name, address })
 
       const { data: newLocation, error: createError } = await this.db
         .from("locations")
         .insert({
           location_code: locationCode,
           name,
-          address,
+          address: address || null,
         })
         .select()
         .single()
 
       if (createError) {
-        this.logger.error("Failed to create location", { createError, locationCode, name })
+        console.error("Failed to create location", { createError, locationCode, name })
         throw createError
       }
 
@@ -68,7 +99,7 @@ export class LocationService extends BaseService {
         throw new Error("No location returned after creation")
       }
 
-      this.logger.info("Successfully created new location", {
+      console.log("Successfully created new location", {
         locationId: newLocation.id,
         locationCode: newLocation.location_code,
         name: newLocation.name,
@@ -76,57 +107,91 @@ export class LocationService extends BaseService {
 
       return newLocation
     } catch (error) {
-      this.logger.error("Error in findOrCreateByCode", { error, locationCode, name })
+      console.error("Error in findOrCreateByCode", { error, locationCode, name })
       throw error
     }
   }
 
   async create(locationData: CreateLocationDTO): Promise<Location> {
-    this.logger.info("Creating location", { locationData })
+    console.log("Creating location", { locationData })
 
     this.validateLocationData(locationData)
 
-    return await this.executeQuery(
-      () => this.db.from("locations").insert(locationData).select().single(),
-      "Failed to create location",
-    )
+    const { data, error } = await this.db
+      .from("locations")
+      .insert({
+        name: locationData.name,
+        location_code: locationData.locationCode,
+        address: locationData.address || null,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      throw new Error(`Failed to create location: ${error.message}`)
+    }
+
+    if (!data) {
+      throw new Error("No location returned after creation")
+    }
+
+    return data
   }
 
   async getAll(): Promise<Location[]> {
-    this.logger.info("Fetching all locations")
+    console.log("Fetching all locations")
 
-    return await this.executeQuery(
-      () => this.db.from("locations").select("*").order("name"),
-      "Failed to fetch locations",
-    )
+    const { data, error } = await this.db.from("locations").select("*").order("name")
+
+    if (error) {
+      throw new Error(`Failed to fetch locations: ${error.message}`)
+    }
+
+    return data || []
   }
 
   async update(id: string, updates: Partial<CreateLocationDTO>): Promise<Location> {
-    this.logger.info("Updating location", { id, updates })
+    console.log("Updating location", { id, updates })
 
     if (updates.locationCode) {
       this.validateLocationCode(updates.locationCode)
     }
 
-    return await this.executeQuery(
-      () =>
-        this.db
-          .from("locations")
-          .update({
-            ...updates,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", id)
-          .select()
-          .single(),
-      "Failed to update location",
-    )
+    const dbUpdates: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+    }
+
+    if (updates.name) {
+      dbUpdates.name = updates.name
+    }
+    if (updates.locationCode) {
+      dbUpdates.location_code = updates.locationCode
+    }
+    if (updates.address !== undefined) {
+      dbUpdates.address = updates.address
+    }
+
+    const { data, error } = await this.db.from("locations").update(dbUpdates).eq("id", id).select().single()
+
+    if (error) {
+      throw new Error(`Failed to update location: ${error.message}`)
+    }
+
+    if (!data) {
+      throw new Error("No location returned after update")
+    }
+
+    return data
   }
 
   async delete(id: string): Promise<void> {
-    this.logger.info("Deleting location", { id })
+    console.log("Deleting location", { id })
 
-    await this.executeCommand(() => this.db.from("locations").delete().eq("id", id), "Failed to delete location")
+    const { error } = await this.db.from("locations").delete().eq("id", id)
+
+    if (error) {
+      throw new Error(`Failed to delete location: ${error.message}`)
+    }
   }
 
   private validateLocationData(data: CreateLocationDTO): void {

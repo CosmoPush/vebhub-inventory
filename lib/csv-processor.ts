@@ -1,19 +1,43 @@
-import { supabaseAdmin } from "./supabase/server"
-import type { VendorARow, VendorBRow } from "./types"
+import { createServerSupabaseClient } from "./supabase/server"
+
+// Define types locally to avoid import issues
+interface VendorARow {
+  Location_ID: string
+  Product_Name: string
+  Scancode: string
+  Trans_Date: string
+  Price: string
+  Total_Amount: string
+}
+
+interface VendorBRow {
+  Site_Code: string
+  Item_Description: string
+  UPC: string
+  Sale_Date: string
+  Unit_Price: string
+  Final_Total: string
+}
 
 export class CSVProcessor {
+  private supabase: any
+
+  constructor(supabaseClient: any) {
+    this.supabase = supabaseClient
+  }
+
   private async findOrCreateLocation(locationCode: string, dataSource: string) {
     // Normalize location codes (some sources have different formats)
     const normalizedCode = locationCode.replace(/^2\.0_/, "")
 
-    let { data: location } = await supabaseAdmin
+    let { data: location } = await this.supabase
       .from("locations")
       .select("*")
       .or(`location_code.eq.${locationCode},location_code.eq.${normalizedCode}`)
       .single()
 
     if (!location) {
-      const { data: newLocation, error } = await supabaseAdmin
+      const { data: newLocation, error } = await this.supabase
         .from("locations")
         .insert({
           location_code: locationCode,
@@ -34,14 +58,14 @@ export class CSVProcessor {
     // Normalize product names (remove brand variations)
     const normalizedName = name.replace(/\s+(Vanilla|Berry|Arctic).*$/i, "").trim()
 
-    let { data: product } = await supabaseAdmin
+    let { data: product } = await this.supabase
       .from("products")
       .select("*")
       .or(`upc.eq.${upc},name.ilike.%${normalizedName}%`)
       .single()
 
     if (!product) {
-      const { data: newProduct, error } = await supabaseAdmin
+      const { data: newProduct, error } = await this.supabase
         .from("products")
         .insert({
           name: name,
@@ -94,7 +118,7 @@ export class CSVProcessor {
         const totalAmount = Number.parseFloat(row.Total_Amount)
 
         // Insert sales transaction
-        const { error: salesError } = await supabaseAdmin.from("sales_transactions").insert({
+        const { error: salesError } = await this.supabase.from("sales_transactions").insert({
           location_id: location.id,
           product_id: product.id,
           quantity_sold: 1, // Assuming 1 item per transaction
@@ -133,7 +157,7 @@ export class CSVProcessor {
         const totalAmount = Number.parseFloat(row.Final_Total)
 
         // Insert sales transaction
-        const { error: salesError } = await supabaseAdmin.from("sales_transactions").insert({
+        const { error: salesError } = await this.supabase.from("sales_transactions").insert({
           location_id: location.id,
           product_id: product.id,
           quantity_sold: 1, // Assuming 1 item per transaction
@@ -161,7 +185,7 @@ export class CSVProcessor {
 
   private async updateInventory(locationId: string, productId: string, quantityChange: number) {
     // Get current inventory
-    const { data: inventory } = await supabaseAdmin
+    const { data: inventory } = await this.supabase
       .from("inventory")
       .select("*")
       .eq("location_id", locationId)
@@ -171,7 +195,7 @@ export class CSVProcessor {
     if (inventory) {
       // Update existing inventory
       const newStock = Math.max(0, inventory.current_stock + quantityChange)
-      await supabaseAdmin
+      await this.supabase
         .from("inventory")
         .update({
           current_stock: newStock,
@@ -180,7 +204,7 @@ export class CSVProcessor {
         .eq("id", inventory.id)
     } else {
       // Create new inventory record
-      await supabaseAdmin.from("inventory").insert({
+      await this.supabase.from("inventory").insert({
         location_id: locationId,
         product_id: productId,
         current_stock: Math.max(0, quantityChange),
@@ -188,5 +212,11 @@ export class CSVProcessor {
         max_stock: 50,
       })
     }
+  }
+
+  // Static method to create an instance with server client
+  static async create() {
+    const supabase = await createServerSupabaseClient()
+    return new CSVProcessor(supabase)
   }
 }

@@ -1,10 +1,25 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
-import { BaseService } from "./base.service"
-import { LocationService } from "./location.service"
-import { ProductService } from "./product.service"
-import { InventoryService } from "./inventory.service"
-import type { VendorARow, VendorBRow, DataSource, Location, Product, ProductCategory } from "@/lib/types/domain"
-import { ProcessingError, ValidationError } from "@/lib/types/domain"
+
+// Define types locally to avoid import issues - with index signatures
+interface VendorARow {
+  Location_ID: string
+  Product_Name: string
+  Scancode: string
+  Trans_Date: string
+  Price: string
+  Total_Amount: string
+  [key: string]: string // Add index signature
+}
+
+interface VendorBRow {
+  Site_Code: string
+  Item_Description: string
+  UPC: string
+  Sale_Date: string
+  Unit_Price: string
+  Final_Total: string
+  [key: string]: string // Add index signature
+}
 
 interface ProcessingResult {
   processed: number
@@ -19,25 +34,38 @@ interface NormalizedTransaction {
   saleDate: string
   unitPrice: number
   totalAmount: number
-  rawData: Record<string, unknown>
+  rawData: Record<string, any> // Changed to any for flexibility
 }
 
-export class CSVProcessorService extends BaseService {
-  private readonly locationService: LocationService
-  private readonly productService: ProductService
-  private readonly inventoryService: InventoryService
+interface Location {
+  id: string
+  name: string
+  location_code: string
+  address: string | null
+}
+
+interface Product {
+  id: string
+  name: string
+  upc: string
+  category: string
+}
+
+type ProductCategory = "Energy Drinks" | "Protein Drinks" | "Soft Drinks" | "Candy" | "Snacks" | "Other"
+type DataSource = "vendor_a" | "vendor_b"
+
+export class CSVProcessorService {
+  private db: SupabaseClient
 
   constructor(db: SupabaseClient) {
-    super(db, "CSVProcessorService")
-    this.locationService = new LocationService(db)
-    this.productService = new ProductService(db)
-    this.inventoryService = new InventoryService(db)
+    this.db = db
   }
 
   async processVendorA(rows: VendorARow[], importId: string): Promise<ProcessingResult> {
     const results: ProcessingResult = { processed: 0, failed: 0, errors: [] }
 
-    for (const [index, row] of rows.entries()) {
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index]
       try {
         const normalized = this.normalizeVendorARow(row)
         await this.processNormalizedTransaction(normalized, "vendor_a")
@@ -55,7 +83,8 @@ export class CSVProcessorService extends BaseService {
   async processVendorB(rows: VendorBRow[], importId: string): Promise<ProcessingResult> {
     const results: ProcessingResult = { processed: 0, failed: 0, errors: [] }
 
-    for (const [index, row] of rows.entries()) {
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index]
       try {
         const normalized = this.normalizeVendorBRow(row)
         await this.processNormalizedTransaction(normalized, "vendor_b")
@@ -80,7 +109,7 @@ export class CSVProcessorService extends BaseService {
       saleDate: this.parseDate(row.Trans_Date),
       unitPrice: this.parsePrice(row.Price),
       totalAmount: this.parsePrice(row.Total_Amount),
-      rawData: row,
+      rawData: { ...row }, // Spread operator to ensure compatibility
     }
   }
 
@@ -94,7 +123,7 @@ export class CSVProcessorService extends BaseService {
       saleDate: this.parseDate(row.Sale_Date),
       unitPrice: this.parsePrice(row.Unit_Price),
       totalAmount: this.parsePrice(row.Final_Total),
-      rawData: row,
+      rawData: { ...row }, // Spread operator to ensure compatibility
     }
   }
 
@@ -103,13 +132,13 @@ export class CSVProcessorService extends BaseService {
     dataSource: DataSource,
   ): Promise<void> {
     try {
-      const location = await this.locationService.findOrCreateByCode(
+      const location = await this.findOrCreateLocation(
         transaction.locationCode,
         `Location ${transaction.locationCode}`,
         `Auto-created from ${dataSource} data`,
       )
 
-      const product = await this.productService.findOrCreateByUPC(
+      const product = await this.findOrCreateProduct(
         transaction.upc,
         transaction.productName,
         this.categorizeProduct(transaction.productName),
@@ -117,9 +146,81 @@ export class CSVProcessorService extends BaseService {
 
       await this.createSalesTransaction(location, product, transaction, dataSource)
       await this.ensureInventoryExists(location.id, product.id)
-      await this.inventoryService.updateInventoryByLocationAndProduct(location.id, product.id, -1)
+      await this.updateInventory(location.id, product.id, -1)
     } catch (error) {
       throw error
+    }
+  }
+
+  private async findOrCreateLocation(locationCode: string, name: string, address: string): Promise<Location> {
+    try {
+      const { data: existingLocation, error: fetchError } = await this.db
+        .from("locations")
+        .select("*")
+        .eq("location_code", locationCode)
+        .single()
+
+      if (fetchError && fetchError.code !== "PGRST116") {
+        throw fetchError
+      }
+
+      if (existingLocation) {
+        return existingLocation
+      }
+
+      const { data: newLocation, error: insertError } = await this.db
+        .from("locations")
+        .insert({
+          location_code: locationCode,
+          name: name,
+          address: address,
+        })
+        .select()
+        .single()
+
+      if (insertError) {
+        throw insertError
+      }
+
+      return newLocation
+    } catch (error) {
+      throw new Error(`Failed to find or create location: ${error}`)
+    }
+  }
+
+  private async findOrCreateProduct(upc: string, name: string, category: ProductCategory): Promise<Product> {
+    try {
+      const { data: existingProduct, error: fetchError } = await this.db
+        .from("products")
+        .select("*")
+        .eq("upc", upc)
+        .single()
+
+      if (fetchError && fetchError.code !== "PGRST116") {
+        throw fetchError
+      }
+
+      if (existingProduct) {
+        return existingProduct
+      }
+
+      const { data: newProduct, error: insertError } = await this.db
+        .from("products")
+        .insert({
+          upc: upc,
+          name: name,
+          category: category,
+        })
+        .select()
+        .single()
+
+      if (insertError) {
+        throw insertError
+      }
+
+      return newProduct
+    } catch (error) {
+      throw new Error(`Failed to find or create product: ${error}`)
     }
   }
 
@@ -137,17 +238,13 @@ export class CSVProcessorService extends BaseService {
       }
 
       if (!existingInventory) {
-        const { data: newInventory, error: insertError } = await this.db
-          .from("inventory")
-          .insert({
-            location_id: locationId,
-            product_id: productId,
-            current_stock: 25,
-            min_stock: 5,
-            max_stock: 50,
-          })
-          .select()
-          .single()
+        const { error: insertError } = await this.db.from("inventory").insert({
+          location_id: locationId,
+          product_id: productId,
+          current_stock: 25,
+          min_stock: 5,
+          max_stock: 50,
+        })
 
         if (insertError) {
           throw insertError
@@ -158,6 +255,37 @@ export class CSVProcessorService extends BaseService {
     }
   }
 
+  private async updateInventory(locationId: string, productId: string, quantityChange: number): Promise<void> {
+    try {
+      const { data: inventory, error: fetchError } = await this.db
+        .from("inventory")
+        .select("*")
+        .eq("location_id", locationId)
+        .eq("product_id", productId)
+        .single()
+
+      if (fetchError) {
+        throw fetchError
+      }
+
+      const newStock = Math.max(0, (inventory.current_stock || 0) + quantityChange)
+
+      const { error: updateError } = await this.db
+        .from("inventory")
+        .update({
+          current_stock: newStock,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", inventory.id)
+
+      if (updateError) {
+        throw updateError
+      }
+    } catch (error) {
+      throw new Error(`Failed to update inventory: ${error}`)
+    }
+  }
+
   private async createSalesTransaction(
     location: Location,
     product: Product,
@@ -165,20 +293,16 @@ export class CSVProcessorService extends BaseService {
     dataSource: DataSource,
   ): Promise<void> {
     try {
-      const { data, error } = await this.db
-        .from("sales_transactions")
-        .insert({
-          location_id: location.id,
-          product_id: product.id,
-          quantity_sold: 1,
-          unit_price: transaction.unitPrice,
-          total_amount: transaction.totalAmount,
-          sale_date: transaction.saleDate,
-          data_source: dataSource,
-          raw_data: transaction.rawData,
-        })
-        .select()
-        .single()
+      const { error } = await this.db.from("sales_transactions").insert({
+        location_id: location.id,
+        product_id: product.id,
+        quantity_sold: 1,
+        unit_price: transaction.unitPrice,
+        total_amount: transaction.totalAmount,
+        sale_date: transaction.saleDate,
+        data_source: dataSource,
+        raw_data: transaction.rawData,
+      })
 
       if (error) {
         throw new Error(`Failed to create sales transaction: ${error.message}`)
@@ -196,7 +320,7 @@ export class CSVProcessorService extends BaseService {
     })
 
     if (missingFields.length > 0) {
-      throw new ValidationError(`Missing required fields: ${missingFields.join(", ")}`)
+      throw new Error(`Missing required fields: ${missingFields.join(", ")}`)
     }
   }
 
@@ -208,7 +332,7 @@ export class CSVProcessorService extends BaseService {
     })
 
     if (missingFields.length > 0) {
-      throw new ValidationError(`Missing required fields: ${missingFields.join(", ")}`)
+      throw new Error(`Missing required fields: ${missingFields.join(", ")}`)
     }
   }
 
@@ -227,7 +351,7 @@ export class CSVProcessorService extends BaseService {
       }
       throw new Error(`Invalid date format: ${dateStr}`)
     } catch (error) {
-      throw new ProcessingError(`Failed to parse date: ${dateStr}`)
+      throw new Error(`Failed to parse date: ${dateStr}`)
     }
   }
 
@@ -239,7 +363,7 @@ export class CSVProcessorService extends BaseService {
       }
       return price
     } catch (error) {
-      throw new ProcessingError(`Failed to parse price: ${priceStr}`)
+      throw new Error(`Failed to parse price: ${priceStr}`)
     }
   }
 
